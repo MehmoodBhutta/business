@@ -107,7 +107,7 @@ function loadSample() {
       { name: "Webhook", type: "n8n-nodes-base.webhook", parameters: {} },
       { name: "Code", type: "n8n-nodes-base.code", parameters: { jsCode: "const key = 'sk-proj-abc123'; return items; }" } },
       { name: "HTTP Request", type: "n8n-nodes-base.httpRequest", parameters: { url: "https://api.example.com/leads", retryOnFail: false, maxTries: 1, onError: "continueRegularOutput" } },
-      { name: "OpenAI", type: "@n8n/n8n-nodes-langchain.openAi", typeVersion: 1, parameters: {} }
+      { name: "OpenAI (legacy)", type: "n8n-nodes-base.openai", typeVersion: 1, parameters: {} }
     ],
     connections: { "Webhook": { "main": [[{ node: "Code", type: "main", index: 0 }]] } }
   }, null, 2);
@@ -191,6 +191,25 @@ function runScan() {
   if (s.saveExecutionProgress === false && s.saveDataSuccessExecution === false) {
     findings.push({ sev: 'warn', title: 'Execution data saving disabled',
       fix: 'You cannot debug failures without execution history.' });
+  }
+
+  // 7. n8n 3.0 migration: legacy nodes that get REMOVED in v3
+  const LEGACY = ['n8n-nodes-base.function', 'n8n-nodes-base.functionItem', 'n8n-nodes-base.itemLists',
+                  'n8n-nodes-base.cron', 'n8n-nodes-base.interval', 'n8n-nodes-base.openai'];
+  const legacyFound = nodes.filter(n => LEGACY.some(l => (n.type||'').startsWith(l)));
+  if (legacyFound.length) {
+    findings.push({ sev: 'crit', title: legacyFound.length + ' legacy node(s) REMOVED in n8n 3.0',
+      fix: 'Nodes: ' + [...new Set(legacyFound.map(n => (n.type||'').split('.').pop()))].join(', ') + '. These stop working entirely in v3 (beta Oct 27, stable Dec). Must be replaced before upgrade - and there is NO downgrade path.' });
+  }
+  // 7b. old AI agent modes
+  const aiAgents = nodes.filter(n => (n.type||'').includes('agent') || (n.type||'').includes('langchain'));
+  if (aiAgents.length) {
+    findings.push({ sev: 'warn', title: aiAgents.length + ' AI/agent node(s) - check v3 compatibility',
+      fix: 'Older AI Agent modes are removed in 3.0. Verify each agent node against the v3 breaking-changes list before upgrading.' });
+  }
+  // 7c. npm/npx install flag (self-hosters)
+  if ((wf.meta || {}).instanceId === undefined && wf.nodes && wf.nodes.length > 0) {
+    // can\'t detect install type from JSON alone - skip
   }
 
   if (!findings.length) findings.push({ sev:'ok', title:'No obvious issues found in these checks', fix:'This scanner covers 6 common failure classes. A full manual review catches deeper logic bugs.' });
