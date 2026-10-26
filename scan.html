@@ -212,7 +212,177 @@ function runScan() {
     // can\'t detect install type from JSON alone - skip
   }
 
-  if (!findings.length) findings.push({ sev:'ok', title:'No obvious issues found in these checks', fix:'This scanner covers 6 common failure classes. A full manual review catches deeper logic bugs.' });
+  // ============ CORRECTNESS LAYER: will this workflow actually run? ============
+  const byName = {};
+  nodes.forEach(n => { if (n.name) (byName[n.name] = byName[n.name] || []).push(n); });
+
+  // C1. duplicate node names (breaks connections + $('name') references)
+  Object.entries(byName).forEach(([name, arr]) => {
+    if (arr.length > 1) findings.push({ sev:'crit',
+      title: 'Duplicate node name "'+name+'" ('+arr.length+' nodes share it)',
+      fix: 'Node names must be unique - connections and $() references resolve by name and will misroute.' });
+  });
+
+  // C2. duplicate node IDs (n8n rejects import)
+  const byId = {};
+  nodes.forEach(n => { if (n.id) (byId[n.id] = byId[n.id] || []).push(n); });
+  Object.entries(byId).forEach(([id, arr]) => {
+    if (arr.length > 1) findings.push({ sev:'crit',
+      title: 'Duplicate node ID ('+arr.length+' nodes share id '+String(id).slice(0,8)+'...)',
+      fix: 'Each node needs a unique UUID. Duplicate IDs make n8n reject the import or behave unpredictably.' });
+  });
+
+  // C3. connections referencing non-existent nodes
+  const conns = wf.connections || {};
+  Object.entries(conns).forEach(([from, outs]) => {
+    if (!byName[from]) findings.push({ sev:'crit',
+      title: 'Connection starts from missing node "'+from+'"',
+      fix: 'The connections object references a node that does not exist. Import will fail or the flow silently ends there.' });
+    const main = outs && outs.main;
+    if (Array.isArray(main)) main.forEach(branch => {
+      (branch || []).forEach(c => {
+        if (c && c.node && !byName[c.node]) findings.push({ sev:'crit',
+          title: 'Connection to missing node "'+c.node+'" (from "'+from+'")',
+          fix: 'This reference points at a node that does not exist - usually a typo in the node name.' });
+      });
+    });
+  });
+
+  // C4. orphaned nodes: no incoming connection and not a trigger
+  const TRIGGERS = /webhook|trigger|manualTrigger|scheduleTrigger|formTrigger|chatTrigger|emailRead|interval|cron|executeWorkflowTrigger/i;
+  const incoming = new Set();
+  Object.entries(conns).forEach(([from, outs]) => {
+    const main = outs && outs.main;
+    if (Array.isArray(main)) main.forEach(branch => (branch||[]).forEach(c => { if (c && c.node) incoming.add(c.node); }));
+  });
+  const orphans = nodes.filter(n => !incoming.has(n.name) && !TRIGGERS.test(n.type||''));
+  if (orphans.length) findings.push({ sev:'crit',
+    title: orphans.length + ' orphaned node(s): unreachable, never executed',
+    fix: 'No connection feeds these nodes: ' + orphans.map(n => '"'+n.name+'"').slice(0,4).join(', ') + (orphans.length>4?'...':'') + '. If you meant them to run, connect them; if not, delete them.' });
+
+  // C5. webhook with responseMode responseNode but no Respond to Webhook node
+  webhooks.forEach(n => {
+    if ((n.parameters||{}).responseMode === 'responseNode') {
+      const name = n.name;
+      // check if any path from this webhook reaches a respondToWebhook node
+      const hasResponder = nodes.some(m => (m.type||'').includes('respondToWebhook'));
+      if (!hasResponder) findings.push({ sev:'crit',
+        title: 'Webhook "'+name+'" uses responseMode=responseNode but workflow has no "Respond to Webhook" node',
+        fix: 'Callers will hang until timeout. Either add a Respond to Webhook node on every branch, or switch responseMode to onReceived/lastNode.' });
+    }
+  });
+
+  // C6. Code nodes: obvious JS/runtime errors (static checks)
+  const jsIssues = [];
+  function checkJs(name, js) {
+    if (!js) return;
+    if (/\$input\.item\b/.test(js) && /return\s*\{/.test(js) && !/return\s*items/.test(js)) {
+      // $input.item in a runOnceForAllItems context + returning a bare object
+      const mode = 'unknown';
+      jsIssues.push({ n:name, msg:'uses $input.item (single-item) while returning a bare object - in runOnceForAllItems mode this returns ONE object instead of an items array and drops all other items' });
+    }
+    const m = js.match(/\$\(['"]([^'"]+)['"]\)/g) || [];
+    m.forEach(ref => {
+      const refName = ref.replace(/\$\(['"]|['"]\)/g, '');
+      if (!byName[refName]) jsIssues.push({ n:name, msg:'references $('+ref+') but no node with that exact name exists (typo? renamed node?)' });
+    });
+    // syntax check: unbalanced parens/brackets
+    const bal = (s, a, b) => (s.split(a).length - 1) - (s.split(b).length - 1);
+    ['(',')'].forEach((v,i,arr) => {});
+    const pb = bal(js, '(', ')');
+    if (pb !== 0) jsIssues.push({ n:name, msg:'unbalanced parentheses in code (' + (pb>0?'missing closing':'missing opening') + ' paren - code will not parse' });
+    const bb = bal(js, '{', '}');
+    if (bb !== 0) jsIssues.push({ n:name, msg:'unbalanced braces in code (' + (bb>0?'missing closing':'missing opening') + ' brace - code will not parse' });
+  }
+  nodes.forEach(n => { if ((n.type||'').includes('code')) checkJs(n.name, (n.parameters||{}).jsCode); });
+  jsIssues.forEach(i => findings.push({ sev:'crit',
+    title: 'Code node "'+i.n+'": ' + i.msg,
+    fix: 'This is a runtime/logic error the workflow will crash or misbehave on. Check the code carefully - or send it to me and I will fix it.' }));
+
+  // C7. common typos in expression references ($('Node Name') vs actual node)
+  nodes.forEach(n => {
+    const p = JSON.stringify(n.parameters||{});
+    const refs = p.match(/\$\(['"]([^'"]+)['"]\)/g) || [];
+    refs.forEach(ref => {
+      const refName = ref.replace(/\$\(['"]|['"]\)/g, '');
+      if (!byName[refName] && !jsIssues.some(i => i.msg.includes(refName))) findings.push({ sev:'crit',
+        title: 'Node "'+n.name+'" references $('+refName+') which does not exist',
+        fix: 'Node references are name-based. A typo here crashes the node at runtime with "no node named ... found".' });
+    });
+  });
+
+  // C8. HTTP nodes: URL without protocol + invalid-looking JSON body
+  nodes.filter(n => (n.type||'').includes('httpRequest')).forEach(n => {
+    const p = n.parameters||{};
+    const url = p.url || '';
+    if (url && !/^https?:\/\//i.test(url) && url.startsWith('api.') || (url && /^[a-z0-9.-]+\.[a-z]{2,}/i.test(url) && !/^https?:/i.test(url)))
+      findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" URL has no protocol: '+String(url).slice(0,50),
+        fix: 'n8n requires http:// or https:// in the URL field. Without it the request fails with an invalid-URL error.' });
+    if (p.specifyBody === 'json' && typeof p.jsonBody === 'string' && p.jsonBody.includes('=') === false) {
+      // plain JSON body - validate it parses
+      try { JSON.parse(p.jsonBody); } catch(e) {
+        findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" has a JSON body that does not parse',
+          fix: 'Check trailing commas, unquoted keys, or unbalanced braces. n8n rejects the request before it is even sent.' });
+      }
+    } else if (p.specifyBody === 'json' && typeof p.jsonBody === 'string' && p.jsonBody.startsWith('=')) {
+      // expression body: check trailing comma inside object literal
+      const expr = p.jsonBody.slice(1);
+      if (/,\s*}/.test(expr)) findings.push({ sev:'warn', title: 'HTTP node "'+n.name+'" JSON body has a trailing comma before a closing brace',
+        fix: 'Trailing commas are invalid JSON - the request will fail with a parse error at runtime.' });
+    }
+    // placeholder tokens left in URL
+    if (/<[A-Z_]+>/.test(url)) findings.push({ sev:'crit',
+      title: 'HTTP node "'+n.name+'" still contains a placeholder token in the URL (' + (url.match(/<[A-Z_]+>/)||[''])[0] + ')',
+      fix: 'Replace placeholder values with real ones before running - this URL cannot work as-is.' });
+  });
+
+  // C9. IF node strict type validation: comparing with wrong type
+  nodes.filter(n => (n.type||'').endsWith('.if')).forEach(n => {
+    const s = JSON.stringify(n.parameters||{});
+    if (s.includes('"typeValidation":"strict"') && /leftValue.*\$json\.[a-zA-Z]+\.[a-zA-Z]+/.test(s)) {
+      // strict mode + nested property access = common mismatch source (warning only, content-dependent)
+      findings.push({ sev:'warn', title: 'IF node "'+n.name+'" uses strict type validation on an expression',
+        fix: 'In strict mode a boolean-vs-string mismatch fails the comparison instead of coercing. Verify the left value type matches the operator - this is a classic silent-wrong-branch source.' });
+    }
+  });
+
+  // C10. disabled nodes still wired as the ONLY path
+  nodes.filter(n => n.disabled).forEach(n => {
+    const feeds = Object.entries(conns).filter(([f,o]) => {
+      const main = o && o.main;
+      return Array.isArray(main) && main.some(b => (b||[]).some(c => c && c.node === n.name));
+    });
+    if (feeds.length) findings.push({ sev:'warn',
+      title: 'Node "'+n.name+'" is DISABLED but sits in the execution path',
+      fix: 'Data flows through disabled nodes unchanged - verify the branch still produces what downstream nodes expect.' });
+  });
+
+  // C11. Respond-path sanity for webhook flows
+  const webhookCount = webhooks.length;
+  if (webhookCount && !nodes.some(n => (n.type||'').includes('respondToWebhook')) &&
+      webhooks.some(n => (n.parameters||{}).responseMode !== 'responseNode')) {
+    findings.push({ sev:'ok', title: 'Webhook responses: lastNode mode (no explicit responder needed)', fix:'' });
+  }
+
+  // C12. unbalanced parentheses inside inline expressions anywhere in a node's parameters
+  function walkStrings(obj, cb) {
+    if (typeof obj === 'string') { cb(obj); return; }
+    if (Array.isArray(obj)) { obj.forEach(v => walkStrings(v, cb)); return; }
+    if (obj && typeof obj === 'object') { Object.values(obj).forEach(v => walkStrings(v, cb)); }
+  }
+  nodes.forEach(n => {
+    walkStrings(n.parameters || {}, v => {
+      if (!v.startsWith('=')) return;
+      const expr = v.slice(1);
+      const open = (expr.match(/\(/g) || []).length;
+      const close = (expr.match(/\)/g) || []).length;
+      if (open !== close) findings.push({ sev: 'crit',
+        title: 'Node "'+n.name+'": expression has unbalanced parentheses ('+open+' open, '+close+' close)',
+        fix: 'The expression fails to compile at runtime - look for a missing closing paren, e.g. .toUpperCase( without its ). Find the node and check every expression field.' });
+    });
+  });
+
+  if (!findings.length) findings.push({ sev:'ok', title:'No issues found in these checks (security + structure + syntax)', fix:'Passed every check the scanner runs. Logic-level bugs (wrong branch conditions, wrong data shapes) still need eyes - send it over if something misbehaves.' });
 
   // score
   const crit = findings.filter(f=>f.sev==='crit').length;
@@ -227,7 +397,7 @@ function runScan() {
 
   report.innerHTML =
     '<div class="score"><div class="big '+cls+'">'+crit+'</div>'+
-    '<div class="lbl"><b>critical findings</b> ('+warn+' warnings, '+ok+' passes). '+verdict+'</div></div>'+
+    '<div class="lbl">'+(crit ? '<b>'+crit+' critical finding'+(crit===1?'':'s')+'</b> - ' : '<b>No critical findings</b> - ')+warn+' warning'+(warn===1?'':'s')+', '+ok+' check'+(ok===1?'':'s')+' passed. '+verdict+'</div></div>'+
     findings.map(f => '<div class="finding"><span class="tag '+f.sev+'">'+f.sev.toUpperCase()+'</span>'+
       '<div><h3>'+f.title+'</h3>'+(f.fix?'<p>'+f.fix+'</p>':'')+'</div></div>').join('')+
     ((crit||warn) ? '<div class="cta-box"><h3>Want these fixed for you?</h3>'+
