@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workflowry n8n Rescue - broken workflow fixed in 24h, $99</title>
+<meta name="description" content="Your broken n8n workflow fixed or diagnosed within 24 hours for a flat $99, plus a security report no one else does. Pay only when it's green.">
+<meta property="og:title" content="Workflowry n8n Rescue">
+<meta property="og:description" content="One broken n8n workflow fixed in 24h. Flat $99. Security report included. Pay only when it runs.">
+<style>
+  :root {
+    --bg: #0c0f0d;
+    --bg2: #11150f;
+    --ink: #e8ece7;
+    --dim: #9aa39a;
+    --line: #232a24;
+    --accent: #00e07b;
+    --accent-dim: rgba(0, 224, 123, 0.12);
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "Space Grotesk", system-ui, -apple-system, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { animation: rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .reveal.d1 { animation-delay: 0.08s; }
+    .reveal.d2 { animation-delay: 0.16s; }
+    .reveal.d3 { animation-delay: 0.24s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+  }
+  a { color: inherit; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  nav {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 64px; border-bottom: 1px solid var(--line);
+  }
+  .brand { font-family: var(--mono); font-size: 15px; letter-spacing: 0.02em; }
+  .brand b { color: var(--accent); font-weight: 600; }
+  nav .cta-mini {
+    font-family: var(--mono); font-size: 13px; color: var(--accent);
+    text-decoration: none; border: 1px solid var(--accent); border-radius: 6px;
+    padding: 7px 14px; transition: background 0.2s;
+  }
+  nav .cta-mini:hover { background: var(--accent-dim); }
+  /* hero: asymmetric split */
+  .hero {
+    display: grid; grid-template-columns: 7fr 5fr; gap: 48px; align-items: center;
+    padding: 72px 0 88px;
+  }
+  .hero h1 {
+    font-size: clamp(34px, 5vw, 54px); line-height: 1.08; letter-spacing: -0.02em;
+    font-weight: 700; margin: 0 0 20px;
+  }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero .sub { color: var(--dim); max-width: 46ch; margin-bottom: 32px; }
+  .cta-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .btn {
+    font-family: var(--mono); font-size: 15px; text-decoration: none;
+    padding: 14px 26px; border-radius: 6px; display: inline-block;
+    transition: transform 0.15s ease, background 0.2s;
+  }
+  .btn:active { transform: translateY(1px) scale(0.98); }
+  .btn-primary { background: var(--accent); color: #062b18; font-weight: 600; }
+  .btn-primary:hover { background: #2bea92; }
+  .btn-ghost { color: var(--ink); border: 1px solid var(--line); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  /* hero right: real report mockup rendered as actual preformatted scan output */
+  .scan {
+    font-family: var(--mono); font-size: 13px; line-height: 1.75;
+    background: var(--bg2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px 22px; white-space: pre; overflow-x: auto;
+  }
+  .scan .ok { color: var(--accent); }
+  .scan .warn { color: #e8b341; }
+  .scan .crit { color: #ff6b6b; }
+  .scan .muted { color: var(--dim); }
+  .scan-head {
+    display: flex; justify-content: space-between; font-size: 12px;
+    color: var(--dim); border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 12px;
+  }
+  /* proof strip */
+  .proof {
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    padding: 28px 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px;
+  }
+  .proof .stat { text-align: left; }
+  .proof .num { font-family: var(--mono); font-size: 28px; color: var(--accent); font-weight: 600; }
+  .proof .lbl { font-size: 13px; color: var(--dim); margin-top: 4px; }
+  /* sections */
+  section { padding: 88px 0; }
+  .kicker { font-family: var(--mono); font-size: 12px; color: var(--accent); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 14px; }
+  h2 { font-size: clamp(26px, 3.4vw, 36px); letter-spacing: -0.015em; line-height: 1.15; margin-bottom: 16px; max-width: 22ch; }
+  .lede { color: var(--dim); max-width: 60ch; margin-bottom: 40px; }
+  /* how it works: vertical steps, numbered mono */
+  .steps { display: grid; gap: 0; max-width: 720px; }
+  .step { display: grid; grid-template-columns: 64px 1fr; gap: 24px; padding: 26px 0; border-bottom: 1px solid var(--line); }
+  .step:last-child { border-bottom: none; }
+  .step .n { font-family: var(--mono); color: var(--accent); font-size: 20px; padding-top: 2px; }
+  .step h3 { font-size: 19px; margin-bottom: 6px; }
+  .step p { color: var(--dim); font-size: 15px; }
+  /* pain grid: 2-col split, not 3 equal cards */
+  .pains { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .pain { background: var(--bg); padding: 28px; }
+  .pain h3 { font-family: var(--mono); font-size: 15px; color: var(--ink); margin-bottom: 8px; }
+  .pain p { color: var(--dim); font-size: 14.5px; }
+  /* pricing */
+  .price-grid { display: grid; grid-template-columns: 5fr 4fr; gap: 32px; align-items: stretch; }
+  .price-card { border: 1px solid var(--accent); border-radius: 10px; padding: 36px; background: var(--bg2); }
+  .price-card .amount { font-family: var(--mono); font-size: 52px; font-weight: 600; color: var(--accent); }
+  .price-card .amount span { font-size: 18px; color: var(--dim); }
+  .price-card ul { list-style: none; margin: 24px 0 28px; display: grid; gap: 12px; }
+  .price-card li { font-size: 15px; color: var(--ink); padding-left: 26px; position: relative; }
+  .price-card li::before { content: "✓"; position: absolute; left: 0; color: var(--accent); font-family: var(--mono); }
+  .upsell { border: 1px solid var(--line); border-radius: 10px; padding: 36px; display: flex; flex-direction: column; }
+  .upsell .tag { font-family: var(--mono); font-size: 12px; color: var(--dim); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 10px; }
+  .upsell h3 { font-size: 20px; margin-bottom: 8px; }
+  .upsell p { color: var(--dim); font-size: 14.5px; flex: 1; }
+  .upsell .amount { font-family: var(--mono); font-size: 30px; color: var(--ink); margin: 18px 0 4px; }
+  .upsell .note { font-size: 13px; color: var(--dim); }
+  /* faq */
+  .faq { max-width: 720px; }
+  .faq details { border-bottom: 1px solid var(--line); padding: 18px 0; }
+  .faq summary { cursor: pointer; font-size: 17px; font-weight: 500; list-style: none; }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary::before { content: "+"; font-family: var(--mono); color: var(--accent); margin-right: 12px; }
+  .faq details[open] summary::before { content: "-"; }
+  .faq .a { color: var(--dim); font-size: 15px; padding: 12px 0 4px 29px; }
+  /* contact */
+  .contact { background: var(--bg2); border-top: 1px solid var(--line); text-align: left; }
+  .contact .big { font-size: clamp(26px, 3.4vw, 38px); letter-spacing: -0.015em; max-width: 24ch; margin-bottom: 12px; }
+  .contact .mail { font-family: var(--mono); font-size: clamp(17px, 2.4vw, 22px); color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent); padding-bottom: 2px; }
+  .contact .mail:hover { background: var(--accent-dim); }
+  .contact .meta { color: var(--dim); font-size: 14px; margin-top: 18px; }
+  footer { border-top: 1px solid var(--line); padding: 28px 0; display: flex; justify-content: space-between; font-size: 13px; color: var(--dim); }
+  footer a { color: var(--dim); text-decoration: none; }
+  footer a:hover { color: var(--accent); }
+  @media (max-width: 860px) {
+    .hero { grid-template-columns: 1fr; padding: 48px 0 64px; }
+    .proof { grid-template-columns: 1fr; gap: 18px; }
+    .pains { grid-template-columns: 1fr; }
+    .price-grid { grid-template-columns: 1fr; }
+    section { padding: 64px 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <div class="brand">workflow<b>ry</b> / n8n-rescue</div>
+    <a class="cta-mini" href="#contact">Get the 24h fix</a>
+  </nav>
+
+  <div class="hero">
+    <div>
+      <h1 class="reveal">Your broken n8n workflow, <em>fixed in 24 hours.</em> Flat $99.</h1>
+      <p class="sub reveal d1">One workflow, one bounded bug, fixed or diagnosed within 24 hours. You also get a security report nobody else does. You pay only when it runs green.</p>
+      <div class="cta-row reveal d2">
+        <a class="btn btn-primary" href="#contact">Start a rescue</a>
+        <a class="btn btn-ghost" href="#how">See how it works</a>
+      </div>
+    </div>
+    <div class="scan reveal d2" role="img" aria-label="Example security scan report output">
+      <div class="scan-head"><span>rescue-report.md</span><span>workflow: lead-sync v4</span></div><span class="muted">$</span> workflowry scan lead-sync.json
+<span class="crit">CRIT</span> webhook "new-leads" has no auth header
+<span class="crit">CRIT</span> openai credential stored in plaintext node
+<span class="warn">WARN</span> error branch missing on HTTP node (step 3)
+<span class="warn">WARN</span> retry limit 0: silent data loss on 429s
+<span class="ok">FIX</span>  auth middleware + error branch patched
+<span class="ok">PASS</span>  6/6 checks green, execution verified
+    </div>
+  </div>
+
+  <div class="proof">
+    <div class="stat"><div class="num">24h</div><div class="lbl">turnaround, or you don't pay</div></div>
+    <div class="stat"><div class="num">$99</div><div class="lbl">flat, one workflow, no surprises</div></div>
+    <div class="stat"><div class="num">6pt</div><div class="lbl">security scan included, free</div></div>
+  </div>
+
+  <section id="how">
+    <div class="kicker">how it works</div>
+    <h2>Three steps, one day.</h2>
+    <p class="lede">No calls, no scoping emails, no hourly billing. You export the workflow, I fix it, you import and run it.</p>
+    <div class="steps">
+      <div class="step"><div class="n">01</div><div><h3>Export the workflow JSON</h3><p>Download the broken workflow from your n8n canvas and email it. Redact any values you want kept private, credential names are all I need.</p></div></div>
+      <div class="step"><div class="n">02</div><div><h3>I fix it and scan it</h3><p>I reproduce the failure, patch it, and run a six-point security scan: exposed webhooks, plaintext credentials, missing error handling, retry gaps.</p></div></div>
+      <div class="step"><div class="n">03</div><div><h3>You verify, then you pay</h3><p>You get the fixed JSON plus a written report. You import it, run it, confirm it's green. Only then do I invoice. Not green, not paid.</p></div></div>
+    </div>
+  </section>
+
+  <section id="pains">
+    <h2>What this fixes</h2>
+    <p class="lede">The failure modes every n8n operator hits eventually.</p>
+    <div class="pains">
+      <div class="pain"><h3>Silent failures</h3><p>Executions that "succeed" while dropping records. Missing error branches, zero retries, swallowed 429s. I make the failure visible, then fix it.</p></div>
+      <div class="pain"><h3>Broken data mapping</h3><p>JavaScript and Python nodes that stopped matching upstream API changes. One bounded mapping bug fixed per rescue.</p></div>
+      <div class="pain"><h3>Exposed webhooks</h3><p>Production webhooks with no authentication, callable by anyone who finds the URL. Closed and verified in the report.</p></div>
+      <div class="pain"><h3>Plaintext credentials</h3><p>API keys sitting in code nodes or plain fields instead of the credential store. Migrated and confirmed.</p></div>
+    </div>
+  </section>
+
+  <section id="pricing">
+    <div class="kicker">pricing</div>
+    <h2>One price. Two ways in.</h2>
+    <p class="lede">Fixed fee, because scoping calls are how you lose a day before any work happens.</p>
+    <div class="price-grid">
+      <div class="price-card">
+        <div class="amount">$99 <span>flat</span></div>
+        <ul>
+          <li>One bounded bug, fixed or diagnosed within 24h</li>
+          <li>Six-point security scan report included</li>
+          <li>Fixed workflow JSON, import-ready</li>
+          <li>Pay only after you verify it runs</li>
+        </ul>
+        <a class="btn btn-primary" href="#contact">Start a rescue</a>
+      </div>
+      <div class="upsell">
+        <div class="tag">for agencies</div>
+        <h3>Full instance audit</h3>
+        <p>Every workflow on your self-hosted instance scanned: security, reliability, credential hygiene. Written hardening report you can hand to clients.</p>
+        <div class="amount">$299</div>
+        <div class="note">per instance, white-label report available</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <h2>Questions people actually ask.</h2>
+    <div class="faq">
+      <details><summary>What if the bug takes longer than 24h?</summary><div class="a">Then I tell you what I found, what I tried, and what the fix requires, and you pay nothing. The deadline is on me.</div></details>
+      <details><summary>Is my workflow data safe?</summary><div class="a">You redact real values before sending. I need structure, node logic, and credential names only. Nothing you send leaves my machine.</div></details>
+      <details><summary>What's in the security report?</summary><div class="a">Six checks: unauthenticated webhooks, plaintext credentials, missing error handling, retry behavior, data-loss paths, and execution verification.</div></details>
+      <details><summary>Why fix plus scan for $99?</summary><div class="a">Because the scan catches what the fix doesn't. Most broken workflows I see are one patch away from silently leaking data, and nobody checks.</div></details>
+      <details><summary>Can you fix the whole instance for $99?</summary><div class="a">No. One workflow, one bounded bug. If it turns out to be bigger, I quote the instance audit instead and you still pay nothing for the rescue attempt.</div></details>
+    </div>
+  </section>
+
+  <section id="contact" class="contact">
+    <p class="big">Send the workflow. It runs green tomorrow, or you don't pay.</p>
+    <p style="margin-bottom: 28px;"><a class="mail" href="mailto:rescue@workflowry.dev?subject=n8n%20Rescue%20-%20workflow%20attached">rescue@workflowry.dev</a></p>
+    <p class="meta">Attach the workflow JSON export. Redact secret values. You'll get a reply within a few hours with a go/no-go and the exact deliverable.</p>
+  </section>
+
+  <footer>
+    <span>Workflowry. Automation, fixed.</span>
+    <span><a href="https://mehmoodbhutta.github.io/Portfolio-Website/">Portfolio</a> · <a href="https://github.com/MehmoodBhutta">GitHub</a></span>
+  </footer>
+</div>
+</body>
+</html>
