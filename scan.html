@@ -267,7 +267,7 @@ function autoFix(wf, findings) {
       changes.push('Replaced $input.item with $input.first() in "' + n.name + '" (runOnceForAllItems mode).');
     }
     const m = js.match(/return\s*(\{[\s\S]*\})\s*;?\s*$/);
-    if (m && !/return\s*items/.test(js)) {
+    if (m && !/return\s*items/.test(js) && (p.mode === 'runOnceForAllItems' || !p.mode)) {
       js = js.slice(0, m.index) + 'return [' + m[1] + '];';
       changed = true;
       changes.push('Wrapped bare-object return in an items array in "' + n.name + '".');
@@ -643,12 +643,12 @@ function runScan() {
 
 // C6. Code nodes: obvious JS/runtime errors (static checks)
   const jsIssues = [];
-  function checkJs(name, js) {
+  function checkJs(name, js, mode) {
     if (!js) return;
     if (/\$input\.item\b/.test(js)) {
       jsIssues.push({ n:name, msg:'uses $input.item (single-item access) - only valid in Run-Once-for-Each-Item mode. In runOnceForAllItems mode this reads the wrong data or throws. Switch the node mode, or use $input.all() / $input.first().' });
     }
-    if (/return\s*\{/.test(js) && !/return\s*items/.test(js) && !/return\s*\[/.test(js)) {
+    if (/return\s*\{/.test(js) && !/return\s*items/.test(js) && !/return\s*\[/.test(js) && (mode === 'runOnceForAllItems' || !mode)) {
       jsIssues.push({ n:name, msg:'returns a bare object - Code nodes must return an array of items; a bare object makes downstream nodes see zero or malformed items' });
     }
     // undefined-chain crash: const X = <path>.<prop>; then X.<sub> - if <prop> is a one-char typo of another property, X is undefined and X.<sub> throws
@@ -676,7 +676,7 @@ function runScan() {
     const bb = bal(js, '{', '}');
     if (bb !== 0) jsIssues.push({ n:name, msg:'unbalanced braces in code (' + (bb>0?'missing closing':'missing opening') + ' brace - code will not parse' });
   }
-  nodes.forEach(n => { if ((n.type||'').includes('code')) checkJs(n.name, (n.parameters||{}).jsCode); });
+  nodes.forEach(n => { if ((n.type||'').includes('code')) checkJs(n.name, (n.parameters||{}).jsCode, (n.parameters||{}).mode); });
   jsIssues.forEach(i => findings.push({ sev:'crit',
     title: 'Code node "'+i.n+'": ' + i.msg,
     fix: 'This is a runtime/logic error: the node crashes or misbehaves on execution. Fix the code or replace the node.' }));
