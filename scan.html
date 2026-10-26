@@ -277,15 +277,83 @@ function runScan() {
     }
   });
 
-  // C6. Code nodes: obvious JS/runtime errors (static checks)
+  // C14. cross-node property consistency: same data path accessed with different spellings = typo suspect
+  function collectPaths(obj, prefix, out, ctx) {
+    if (typeof obj === 'string') {
+      // collect property accesses: X.prop patterns in code and expressions
+      const re = /\.([a-zA-Z_][a-zA-Z0-9_]*)/g;
+      let m;
+      while ((m = re.exec(obj)) !== null) {
+        const prop = m[1];
+        // skip obvious non-data words (method names, JS keywords)
+        if (/^(text|slice|replace|trim|split|toUpperCase|toLowerCase|includes|startsWith|endsWith|push|map|filter|length|json|body|item|items|match|log)$/.test(prop)) continue;
+        (out[prop] = out[prop] || []).push(ctx);
+      }
+      return;
+    }
+    if (Array.isArray(obj)) { obj.forEach(v => collectPaths(v, prefix, out, ctx)); return; }
+    if (obj && typeof obj === 'object') { Object.values(obj).forEach(v => collectPaths(v, prefix, out, ctx)); }
+  }
+  const propUse = {};
+  nodes.forEach(n => {
+    const js = (n.type||'').includes('code') ? ((n.parameters||{}).jsCode||'') : '';
+    collectPaths(js, n.name, propUse, n.name + ' (code)');
+    collectPaths(JSON.stringify((n.parameters||{})), n.name, propUse, n.name + ' (params)');
+  });
+  function levenshtein(a, b) { return damerau(a, b); }
+  const propsSeen = Object.keys(propUse).filter(p => p.length > 3);
+  propsSeen.forEach((p1, i) => {
+    for (let j = i + 1; j < propsSeen.length; j++) {
+      const p2 = propsSeen[j];
+      if (levenshtein(p1, p2) === 1) {
+        findings.push({ sev: 'crit',
+          title: 'Possible property-name typo: "'+p1+'" (used in '+propUse[p1].length+' place'+(propUse[p1].length===1?'':'s')+') vs "'+p2+'" (used in '+propUse[p2].length+')',
+          fix: 'These two property names differ by one character and are both accessed in this workflow. One of them is very likely a typo - it resolves to undefined and crashes the node using it. Check which spelling the upstream data actually sends and fix the other.' });
+      }
+    }
+  });
+
+  function propTypoSuspect(prop) {
+    if (!prop || prop.length <= 3) return false;
+    return Object.keys(propUse).some(p => p !== prop && levenshtein(p, prop) === 1);
+  }
+
+  function damerau(a, b) {
+    const dp = Array.from({length: a.length+1}, (_,i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a[i-1]===b[j-1]?0:1;
+        dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
+        if (i > 1 && j > 1 && a[i-1]===b[j-2] && a[i-2]===b[j-1]) dp[i][j] = Math.min(dp[i][j], dp[i-2][j-2]+1);
+      }
+    }
+    return dp[a.length][b.length];
+  }
+
+
+// C6. Code nodes: obvious JS/runtime errors (static checks)
   const jsIssues = [];
   function checkJs(name, js) {
     if (!js) return;
-    if (/\$input\.item\b/.test(js) && /return\s*\{/.test(js) && !/return\s*items/.test(js)) {
-      // $input.item in a runOnceForAllItems context + returning a bare object
-      const mode = 'unknown';
-      jsIssues.push({ n:name, msg:'uses $input.item (single-item) while returning a bare object - in runOnceForAllItems mode this returns ONE object instead of an items array and drops all other items' });
+    if (/\$input\.item\b/.test(js)) {
+      jsIssues.push({ n:name, msg:'uses $input.item (single-item access) - only valid in Run-Once-for-Each-Item mode. In runOnceForAllItems mode this reads the wrong data or throws. Switch the node mode, or use $input.all() / $input.first().' });
     }
+    if (/return\s*\{/.test(js) && !/return\s*items/.test(js) && !/return\s*\[/.test(js)) {
+      jsIssues.push({ n:name, msg:'returns a bare object - Code nodes must return an array of items; a bare object makes downstream nodes see zero or malformed items' });
+    }
+    // undefined-chain crash: const X = <path>.<prop>; then X.<sub> - if <prop> is a one-char typo of another property, X is undefined and X.<sub> throws
+    (js.match(/const\s+([a-zA-Z_$][\w$]*)\s*=\s*([^;\n]+)[;\n]/g) || []).forEach(assign => {
+      const am = assign.match(/const\s+([a-zA-Z_$][\w$]*)\s*=\s*.*?\.([a-zA-Z_][\w$]*)\s*;?$/);
+      if (am) {
+        const varName = am[1], srcProp = am[2];
+        const uses = js.match(new RegExp('(^|[^\\w$])' + varName + '\.[a-zA-Z_][\\w$]*', 'g')) || [];
+        if (uses.length && propTypoSuspect(srcProp)) {
+          const sub = uses[0].replace(/^[^\w$]+/, '').split('.').pop();
+          jsIssues.push({ n:name, msg:'"'+varName+'" is assigned from property ".'+srcProp+'" which looks like a typo of another property in this workflow - "'+varName+'" ends up undefined, so "'+varName+'.'+sub+'" throws a TypeError on every run' });
+        }
+      }
+    });
     const m = js.match(/\$\(['"]([^'"]+)['"]\)/g) || [];
     m.forEach(ref => {
       const refName = ref.replace(/\$\(['"]|['"]\)/g, '');
@@ -332,11 +400,19 @@ function runScan() {
     } else if (p.specifyBody === 'json' && typeof p.jsonBody === 'string' && p.jsonBody.startsWith('=')) {
       // expression body: check trailing comma AND unquoted expression placeholders inside the JSON
       const expr = p.jsonBody.slice(1);
-      if (/,\s*}/.test(expr)) findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" JSON body has a trailing comma before a closing brace',
-        fix: 'Trailing commas are invalid JSON - this request fails with a parse error on every run. Remove the comma after the last property.' });
+      let commaBug = /,\s*}/.test(expr);
+      let parseBug = false;
+      let parseWhy = '';
       const stripped = expr.replace(/\{\{[\s\S]*?\}\}/g, '"EXPR"'); // neutralize n8n expressions (non-greedy), then validate the JSON shape
-      try { JSON.parse(stripped); } catch (e2) {
-        findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" JSON body is not valid JSON even with expressions substituted',
+      try { JSON.parse(stripped); } catch (e2) { parseBug = true; parseWhy = String(e2.message||'invalid JSON'); }
+      if (commaBug && parseBug) {
+        findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" JSON body is invalid JSON (trailing comma + '+(parseWhy.slice(0,60))+')',
+          fix: 'Multiple JSON errors in one body: remove the trailing comma after the last property, then re-check quoting of keys and values. This request fails with a parse error on every run until the body is valid JSON.' });
+      } else if (commaBug) {
+        findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" JSON body has a trailing comma before a closing brace',
+          fix: 'Trailing commas are invalid JSON - this request fails with a parse error on every run. Remove the comma after the last property.' });
+      } else if (parseBug) {
+        findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" JSON body is not valid JSON even with expressions substituted ('+parseWhy.slice(0,60)+')',
           fix: 'Common causes: unquoted keys/values, stray braces from nested {{ }}, or missing quotes. The body must be valid JSON after n8n substitutes the {{ }} expressions - wrap interpolated values in quotes where the API expects strings.' });
       }
     }
@@ -397,42 +473,7 @@ function runScan() {
     });
   });
 
-  // C14. cross-node property consistency: same data path accessed with different spellings = typo suspect
-  const paths = {};
-  nodes.forEach(n => {
-    const js = (n.type||'').includes('code') ? ((n.parameters||{}).jsCode||'') : '';
-    const all = js + JSON.stringify(n.parameters||{});
-    (all.match(/\.(?:json\.body|body)\.[a-zA-Z_][a-zA-Z0-9_]*/g) || []).forEach(m => {
-      const prop = m.split('.').pop();
-      (paths[prop] = paths[prop] || new Set()).add(n.name);
-    });
-    // also track .message / .<prop> leaf accesses on response-ish objects for cross-checking
-    (all.match(/\.(?:message|mesage|contnt|conten)t?\b/g) || []).forEach(m => {
-      const prop = m.replace(/^\./, '');
-      (paths[prop] = paths[prop] || new Set()).add(n.name);
-    });
-  });
-  const props = Object.keys(paths);
-  props.forEach(p1 => {
-    props.forEach(p2 => {
-      if (p1 < p2 && levenshtein(p1, p2) === 1 && p1.length > 3 && p2.length > 3) {
-        findings.push({ sev: 'warn',
-          title: 'Possible property-name typo: "'+p1+'" vs "'+p2+'" both used in JSON.body access',
-          fix: 'These property names differ by one character. One of them is likely a typo - the misspelled one resolves to undefined and crashes the node that uses it. Verify against the upstream payload.' });
-      }
-    });
-  });
-
-  function levenshtein(a, b) {
-    const dp = Array.from({length: a.length+1}, (_,i) => [i, ...Array(b.length).fill(0)]);
-    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
-    for (let i = 1; i <= a.length; i++)
-      for (let j = 1; j <= b.length; j++)
-        dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1] + (a[i-1]===b[j-1]?0:1));
-    return dp[a.length][b.length];
-  }
-
-// C12. unbalanced parentheses inside inline expressions anywhere in a node's parameters
+  // C12. unbalanced parentheses inside inline expressions anywhere in a node's parameters
   function walkStrings(obj, cb) {
     if (typeof obj === 'string') { cb(obj); return; }
     if (Array.isArray(obj)) { obj.forEach(v => walkStrings(v, cb)); return; }
@@ -449,6 +490,20 @@ function runScan() {
         fix: 'The expression fails to compile at runtime - look for a missing closing paren, e.g. .toUpperCase( without its ). Find the node and check every expression field.' });
     });
   });
+
+  // C15. legacy Code-node style: bare `items` global + $json (pre-v2 style) - breaks silently in newer n8n
+  nodes.forEach(n => {
+    const js = (n.type||'').includes('code') ? ((n.parameters||{}).jsCode||'') : '';
+    if (/\bitems\b/.test(js) && /\$json\b/.test(js) && !/\$input\b/.test(js)) {
+      findings.push({ sev:'warn', title: 'Code node "'+n.name+'" mixes legacy `items` global with $json',
+        fix: 'In current n8n the Code node expects $input.all()/item; bare `items` works only in legacy mode and can silently be undefined. Rewrite as const items = $input.all(); and access fields via item.json.' });
+    }
+  });
+
+  // Universal passes (checks that ALWAYS ran): JSON parse + node-type sanity
+  findings.push({ sev:'ok', title: 'File: valid workflow JSON - parsed and scanned (' + nodes.length + ' nodes)', fix:'' });
+  const unknownTypes = nodes.filter(n => !/^[a-zA-Z0-9@._-]+$/.test(n.type||'') || !(n.type||'').includes('.'));
+  if (!unknownTypes.length) findings.push({ sev:'ok', title: 'Node types: all ' + nodes.length + ' nodes have well-formed type identifiers', fix:'' });
 
   // PASS lines: checks that ran and found nothing (trust through transparency)
   const hadConnIssues = findings.some(f => /missing node|Duplicate node (name|ID)|orphaned/.test(f.title));
