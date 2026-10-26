@@ -216,11 +216,12 @@ function autoFix(wf, findings) {
   // --- FIX: HTTP retry/error defaults + URL protocol + JSON body commas
   nodes.filter(n => (n.type || '').includes('httpRequest')).forEach(n => {
     const p = n.parameters = n.parameters || {};
-    if (!p.retryOnFail || (p.maxTries || 1) <= 1) {
-      p.retryOnFail = true; p.maxTries = 3; p.waitBetweenTries = 2000;
-      changes.push('Enabled retries (3x, 2s gap) on HTTP node "' + n.name + '".');
+    if (!n.retryOnFail || (n.maxTries || 1) <= 1) {
+      n.retryOnFail = true; n.maxTries = 3; n.waitBetweenTries = 2000;
+      delete p.retryOnFail; delete p.maxTries; delete p.waitBetweenTries;
+      changes.push('Enabled retries (3x, 2s gap) on HTTP node "' + n.name + '" (node-level setting).');
     }
-    if (!p.onError) { p.onError = 'stopWorkflow'; changes.push('Set onError=stopWorkflow on HTTP node "' + n.name + '".'); }
+    if (!n.onError) { n.onError = 'stopWorkflow'; delete p.onError; }
     if (p.url && !/^https?:\/\//i.test(p.url) && /^[a-z0-9.-]+\.[a-z]{2,}/i.test(p.url)) {
       p.url = 'https://' + p.url;
       changes.push('Added https:// to URL on "' + n.name + '".');
@@ -228,17 +229,42 @@ function autoFix(wf, findings) {
     if (typeof p.jsonBody === 'string' && p.jsonBody.startsWith('=')) {
       const expr = p.jsonBody.slice(1);
       const stripExp = s => s.replace(/\{\{[\s\S]*?\}\}/g, '"EXPR"');
+      // detect unquoted {{expr}}: {{ not preceded by a double-quote
+      const unquoted = [];
+      const reUnq = /(^|[^"])\{\{[\s\S]*?\}\}/g;
+      let um;
+      while ((um = reUnq.exec(expr)) !== null) {
+        if (um[1] !== '"') unquoted.push(um[0].replace(/^[^{]*/, ''));
+      }
       let ok = true;
       try { JSON.parse(stripExp(expr)); } catch (e) { ok = false; }
+      let cleaned = expr;
       if (!ok) {
-        const cleaned = expr.replace(/,(\s*})/g, '$1');
-        try { JSON.parse(stripExp(cleaned)); ok = true; } catch (e2) { ok = false; }
-        if (ok) {
-          p.jsonBody = '=' + cleaned;
-          changes.push('Removed trailing comma(s) from JSON body on "' + n.name + '".');
+        cleaned = expr.replace(/,(\s*})/g, '$1');
+        try { JSON.parse(stripExp(cleaned)); ok = true; changes.push('Removed trailing comma(s) from JSON body on "' + n.name + '".'); } catch (e2) { ok = false; }
+      }
+      // wrap unquoted expressions: raw substitution of e.g. {{ $json.text }} breaks JSON when values contain quotes/newlines
+      if (unquoted.length) {
+        let wrapped = cleaned;
+        unquoted.forEach(u => {
+          const inner = u.slice(2, -2);
+          wrapped = wrapped.replace(u, '{{ JSON.stringify(' + inner + ') }}');
+        });
+        let wrappedOk = true;
+        try { JSON.parse(stripExp(wrapped)); } catch (e3) { wrappedOk = false; }
+        if (wrappedOk) {
+          cleaned = wrapped;
+          ok = true;
+          changes.push('Wrapped ' + unquoted.length + ' unquoted expression(s) in JSON.stringify in body of "' + n.name + '" (raw substitution would break the JSON).');
         } else {
-          manual.push('JSON body on "' + n.name + '" is still unparseable after comma removal - fix quoting manually.');
+          manual.push('JSON body on "' + n.name + '" needs manual quoting - expressions could not be auto-wrapped.');
+          ok = true; // stop further manual pushes for this body
         }
+      }
+      if (!ok) {
+        manual.push('JSON body on "' + n.name + '" is still unparseable - fix quoting manually.');
+      } else {
+        p.jsonBody = '=' + cleaned;
       }
     }
   });
@@ -250,8 +276,19 @@ function autoFix(wf, findings) {
       const list = c.conditions || [];
       const mismatch = list.some(x => /startsWith\(|endsWith\(|includes\(|\.test\(/.test(String(x.leftValue || '')) && ((x.operator || {}).type === 'string'));
       if (mismatch) {
-        c.options.typeValidation = 'loose';
-        changes.push('IF node "' + n.name + '": typeValidation strict -> loose (boolean expression compared as string).');
+        let operatorFixed = false;
+        list.forEach(x => {
+          if (/startsWith\(|endsWith\(|includes\(|\.test\(/.test(String(x.leftValue || '')) && ((x.operator || {}).type === 'string')) {
+            x.operator = Object.assign({}, x.operator, { type: 'boolean', operation: 'true', singleValue: true });
+            operatorFixed = true;
+          }
+        });
+        if (operatorFixed) {
+          changes.push('IF node "' + n.name + '": operator changed string -> boolean (boolean expression was compared as string under strict validation).');
+        } else {
+          c.options.typeValidation = 'loose';
+          changes.push('IF node "' + n.name + '": typeValidation strict -> loose (fallback - operator shape not auto-fixable).');
+        }
       }
     }
   });
@@ -268,7 +305,7 @@ function autoFix(wf, findings) {
     }
     const m = js.match(/return\s*(\{[\s\S]*\})\s*;?\s*$/);
     if (m && !/return\s*items/.test(js) && (p.mode === 'runOnceForAllItems' || !p.mode)) {
-      js = js.slice(0, m.index) + 'return [' + m[1] + '];';
+      js = js.slice(0, m.index) + 'return [{ json: ' + m[1] + ' }];';
       changed = true;
       changes.push('Wrapped bare-object return in an items array in "' + n.name + '".');
     }
@@ -409,6 +446,9 @@ function autoFix(wf, findings) {
   findings && findings.filter(f => /placeholder token/i.test(f.title)).forEach(f => {
     manual.push('Replace placeholder tokens (e.g. <YOUR_TOKEN>) with real values - cannot be invented automatically.');
   });
+  findings && findings.filter(f => /credential/i.test(f.title)).forEach(f => {
+    manual.push('CREDENTIAL: ' + f.title.replace(/^[^:]*: /, '') + ' - recreate the credential in your n8n instance (Credentials > New), then re-link it on the node. Until then that node fails with an auth error on first run.');
+  });
   findings && findings.filter(f => /No error workflow/.test(f.title)).forEach(() => {
     manual.push('Create an error workflow in n8n (Settings > Error workflow) - requires a second workflow, not auto-created.');
   });
@@ -479,8 +519,11 @@ function runScan() {
   let httpMissing = 0;
   http.forEach(n => {
     const p = n.parameters||{};
-    if (p.onError === 'continueRegularOutput' || (p.alwaysOutputData && !p.onError)) httpMissing++;
-    if (!p.retryOnFail || p.maxTries <= 1) httpMissing++;
+    const swallows = p.onError === 'continueRegularOutput' || (p.alwaysOutputData && !p.onError);
+    const hasRetry = (p.retryOnFail === true || n.retryOnFail === true);
+    const tries = p.maxTries || n.maxTries || 1;
+    const noErrHandling = !p.onError && !n.onError && !hasRetry;
+    if (swallows || !hasRetry || tries <= 1 || noErrHandling) httpMissing++;
   });
   if (httpMissing) findings.push({ sev: 'warn', title: httpMissing + ' HTTP node(s) lack retry/error handling',
     fix: 'Enable retryOnFail with maxTries 3+, and set onError to stop or route to an error branch. Silent data loss lives here.' });
@@ -656,7 +699,7 @@ function runScan() {
       jsIssues.push({ n:name, msg:'uses $input.item (single-item access) - only valid in Run-Once-for-Each-Item mode. In runOnceForAllItems mode this reads the wrong data or throws. Switch the node mode, or use $input.all() / $input.first().' });
     }
     if (/return\s*\{/.test(js) && !/return\s*items/.test(js) && !/return\s*\[/.test(js) && (mode === 'runOnceForAllItems' || !mode)) {
-      jsIssues.push({ n:name, msg:'returns a bare object - Code nodes must return an array of items; a bare object makes downstream nodes see zero or malformed items' });
+      jsIssues.push({ n:name, msg:'returns a bare object without a json key - Code nodes should return items like [{ json: {...} }]; a bare object makes downstream nodes see zero or malformed items' });
     }
     // undefined-chain crash: const X = <path>.<prop>; then X.<sub> - if <prop> is a one-char typo of another property, X is undefined and X.<sub> throws
     (js.match(/const\s+([a-zA-Z_$][\w$]*)\s*=\s*([^;\n]+)[;\n]/g) || []).forEach(assign => {
@@ -886,6 +929,15 @@ function runFix() {
     const TRIG = /webhook|trigger|manualTrigger|scheduleTrigger|formTrigger|chatTrigger|emailRead|executeWorkflowTrigger/i;
     const orph = nodes.filter(n => !incoming.has(n.name) && !TRIG.test(n.type||''));
     if (orph.length) derived.push({sev:'crit', title: orph.length + ' orphaned node(s): unreachable, never executed'});
+    nodes.forEach(n => {
+      const creds = n.credentials || {};
+      Object.entries(creds).forEach(([ctype, ref]) => {
+        if (!ref || typeof ref !== 'object') return;
+        const id = String(ref.id || ''); const name = String(ref.name || '');
+        if (!name || /missing|placeholder|does.?not.?exist|xxx|test.?key|REPLACE/i.test(name) || !id || id === 'does-not-exist' || /^x+$/.test(id) || id === 'REPLACE_ME')
+          derived.push({sev:'crit', title:'Node "'+n.name+'" references credential "'+(name||'(unnamed)')+'" (type: '+ctype+') that looks missing or placeholder'});
+      });
+    });
   })(lastWf);
   const { fixed, changes, manual } = autoFix(JSON.parse(JSON.stringify(lastWf)), derived);
   lastFix = fixed;
@@ -897,8 +949,8 @@ function runFix() {
   const blob = 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(fixed, null, 2));
   const fname = ((fixed.name||'workflow').replace(/[^a-z0-9-_]/gi,'-') || 'workflow') + '-v3-fixed.json';
   out.innerHTML =
-    '<div class="cta-box"><h3>Fixed workflow ready - '+changes.length+' change'+(changes.length===1?'':'s')+' applied.</h3>'+
-    '<p style="margin:10px 0 16px;">'+ changes.map(c => '&bull; '+esc(c)).join('<br>') +'</p>'+
+    '<div class="cta-box"><h3>Patched draft ready - '+changes.length+' mechanical change'+(changes.length===1?'':'s')+' applied.</h3>'+
+    '<p style="margin:10px 0 16px;">'+ changes.map(c => '&bull; '+esc(c)).join('<br>') +'</p>'+ '<p style="color:var(--amber);margin-bottom:16px;"><b>This draft is NOT verified to run.</b> Import it, complete the manual list below, then test. The fixes are mechanical and deterministic - your values (credentials, tokens) and intent (orphan nodes) are yours to supply.</p>'+
     ((manual && manual.length) ? '<p style="color:var(--amber);margin-bottom:16px;"><b>Needs your attention (cannot be auto-fixed):</b><br>'+ manual.map(m => '&bull; '+esc(m)).join('<br>') +'</p>' : '')+
     '<a class="btn btn-primary" href="'+blob+'" download="'+fname+'">Download fixed JSON</a> '+
     '<a class="btn btn-ghost" href="mailto:rescue@workflowry.dev?subject=Auto-fix%20done%20-%20review%20request">Want a human double-check?</a>'+
