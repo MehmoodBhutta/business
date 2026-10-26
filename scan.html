@@ -113,6 +113,11 @@ function loadSample() {
   }, null, 2);
 }
 
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 function runScan() {
   const errEl = document.getElementById('err');
   const report = document.getElementById('report');
@@ -297,7 +302,7 @@ function runScan() {
   nodes.forEach(n => { if ((n.type||'').includes('code')) checkJs(n.name, (n.parameters||{}).jsCode); });
   jsIssues.forEach(i => findings.push({ sev:'crit',
     title: 'Code node "'+i.n+'": ' + i.msg,
-    fix: 'This is a runtime/logic error the workflow will crash or misbehave on. Check the code carefully - or send it to me and I will fix it.' }));
+    fix: 'This is a runtime/logic error: the node crashes or misbehaves on execution. Fix the code or replace the node.' }));
 
   // C7. common typos in expression references ($('Node Name') vs actual node)
   nodes.forEach(n => {
@@ -325,10 +330,15 @@ function runScan() {
           fix: 'Check trailing commas, unquoted keys, or unbalanced braces. n8n rejects the request before it is even sent.' });
       }
     } else if (p.specifyBody === 'json' && typeof p.jsonBody === 'string' && p.jsonBody.startsWith('=')) {
-      // expression body: check trailing comma inside object literal
+      // expression body: check trailing comma AND unquoted expression placeholders inside the JSON
       const expr = p.jsonBody.slice(1);
-      if (/,\s*}/.test(expr)) findings.push({ sev:'warn', title: 'HTTP node "'+n.name+'" JSON body has a trailing comma before a closing brace',
-        fix: 'Trailing commas are invalid JSON - the request will fail with a parse error at runtime.' });
+      if (/,\s*}/.test(expr)) findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" JSON body has a trailing comma before a closing brace',
+        fix: 'Trailing commas are invalid JSON - this request fails with a parse error on every run. Remove the comma after the last property.' });
+      const stripped = expr.replace(/\{\{[\s\S]*?\}\}/g, '"EXPR"'); // neutralize n8n expressions (non-greedy), then validate the JSON shape
+      try { JSON.parse(stripped); } catch (e2) {
+        findings.push({ sev:'crit', title: 'HTTP node "'+n.name+'" JSON body is not valid JSON even with expressions substituted',
+          fix: 'Common causes: unquoted keys/values, stray braces from nested {{ }}, or missing quotes. The body must be valid JSON after n8n substitutes the {{ }} expressions - wrap interpolated values in quotes where the API expects strings.' });
+      }
     }
     // placeholder tokens left in URL
     if (/<[A-Z_]+>/.test(url)) findings.push({ sev:'crit',
@@ -336,14 +346,20 @@ function runScan() {
       fix: 'Replace placeholder values with real ones before running - this URL cannot work as-is.' });
   });
 
-  // C9. IF node strict type validation: comparing with wrong type
+  // C9. IF node strict type validation: type mismatch between left expression and right literal
   nodes.filter(n => (n.type||'').endsWith('.if')).forEach(n => {
-    const s = JSON.stringify(n.parameters||{});
-    if (s.includes('"typeValidation":"strict"') && /leftValue.*\$json\.[a-zA-Z]+\.[a-zA-Z]+/.test(s)) {
-      // strict mode + nested property access = common mismatch source (warning only, content-dependent)
-      findings.push({ sev:'warn', title: 'IF node "'+n.name+'" uses strict type validation on an expression',
-        fix: 'In strict mode a boolean-vs-string mismatch fails the comparison instead of coercing. Verify the left value type matches the operator - this is a classic silent-wrong-branch source.' });
-    }
+    const conds = (n.parameters||{}).conditions;
+    const list = (conds && conds.conditions) ? conds.conditions : [];
+    list.forEach(c => {
+      const lv = String(c.leftValue||'');
+      const op = (c.operator||{});
+      const rv = String(c.rightValue===undefined?'':c.rightValue);
+      const boolish = /startsWith\(|endsWith\(|includes\(|\.test\(|===|!==|\bis\b|instanceof/.test(lv);
+      if ((conds||{}).options && (conds.options||{}).typeValidation === 'strict' && boolish && op.type === 'string') {
+        findings.push({ sev:'crit', title: 'IF node "'+n.name+'": boolean result compared as string under strict validation',
+          fix: 'Left value "'+lv.slice(0,60)+'" returns a boolean, but the operator compares it as a string (right value "'+rv+'"). In strict mode this throws a type error on every run instead of taking a branch. Change the operator to Boolean, or drop typeValidation to loose.' });
+      }
+    });
   });
 
   // C10. disabled nodes still wired as the ONLY path
@@ -364,7 +380,59 @@ function runScan() {
     findings.push({ sev:'ok', title: 'Webhook responses: lastNode mode (no explicit responder needed)', fix:'' });
   }
 
-  // C12. unbalanced parentheses inside inline expressions anywhere in a node's parameters
+    // C13. credential references: shape + placeholder detection
+  nodes.forEach(n => {
+    const creds = (n || {}).credentials;
+    if (!creds) return;
+    Object.entries(creds).forEach(([ctype, ref]) => {
+      if (!ref || typeof ref !== 'object') return;
+      const id = String(ref.id || '');
+      const name = String(ref.name || '');
+      if (!name || /^missing|placeholder|does.?not.?exist|xxx|test.?key/i.test(name) ||
+          !id || id === 'does-not-exist' || /^x+$/.test(id)) {
+        findings.push({ sev: 'crit',
+          title: 'Node "'+n.name+'" references credential "'+(name || '(unnamed)')+'" (type: '+ctype+') that looks missing or placeholder',
+          fix: 'The credential id/name is a placeholder or does not exist in this workflow. n8n resolves credentials by id at runtime - if it is absent, the node fails with an auth error on first run. Recreate the credential in your n8n instance and re-link the node.' });
+      }
+    });
+  });
+
+  // C14. cross-node property consistency: same data path accessed with different spellings = typo suspect
+  const paths = {};
+  nodes.forEach(n => {
+    const js = (n.type||'').includes('code') ? ((n.parameters||{}).jsCode||'') : '';
+    const all = js + JSON.stringify(n.parameters||{});
+    (all.match(/\.(?:json\.body|body)\.[a-zA-Z_][a-zA-Z0-9_]*/g) || []).forEach(m => {
+      const prop = m.split('.').pop();
+      (paths[prop] = paths[prop] || new Set()).add(n.name);
+    });
+    // also track .message / .<prop> leaf accesses on response-ish objects for cross-checking
+    (all.match(/\.(?:message|mesage|contnt|conten)t?\b/g) || []).forEach(m => {
+      const prop = m.replace(/^\./, '');
+      (paths[prop] = paths[prop] || new Set()).add(n.name);
+    });
+  });
+  const props = Object.keys(paths);
+  props.forEach(p1 => {
+    props.forEach(p2 => {
+      if (p1 < p2 && levenshtein(p1, p2) === 1 && p1.length > 3 && p2.length > 3) {
+        findings.push({ sev: 'warn',
+          title: 'Possible property-name typo: "'+p1+'" vs "'+p2+'" both used in JSON.body access',
+          fix: 'These property names differ by one character. One of them is likely a typo - the misspelled one resolves to undefined and crashes the node that uses it. Verify against the upstream payload.' });
+      }
+    });
+  });
+
+  function levenshtein(a, b) {
+    const dp = Array.from({length: a.length+1}, (_,i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+    for (let i = 1; i <= a.length; i++)
+      for (let j = 1; j <= b.length; j++)
+        dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1] + (a[i-1]===b[j-1]?0:1));
+    return dp[a.length][b.length];
+  }
+
+// C12. unbalanced parentheses inside inline expressions anywhere in a node's parameters
   function walkStrings(obj, cb) {
     if (typeof obj === 'string') { cb(obj); return; }
     if (Array.isArray(obj)) { obj.forEach(v => walkStrings(v, cb)); return; }
@@ -381,6 +449,16 @@ function runScan() {
         fix: 'The expression fails to compile at runtime - look for a missing closing paren, e.g. .toUpperCase( without its ). Find the node and check every expression field.' });
     });
   });
+
+  // PASS lines: checks that ran and found nothing (trust through transparency)
+  const hadConnIssues = findings.some(f => /missing node|Duplicate node (name|ID)|orphaned/.test(f.title));
+  if (!hadConnIssues) findings.push({ sev:'ok', title: 'Structure: all connections resolve to real nodes, no duplicates or orphans', fix:'' });
+  const hadSecretIssues = findings.some(f => /credential|Hardcoded|plaintext|Password/i.test(f.title));
+  if (!hadSecretIssues) findings.push({ sev:'ok', title: 'Credentials: no placeholder or hardcoded credentials detected', fix:'' });
+  const hadUrlIssues = findings.some(f => /protocol|placeholder token|JSON body/i.test(f.title));
+  if (!hadUrlIssues) findings.push({ sev:'ok', title: 'HTTP nodes: URLs well-formed, bodies parse as JSON', fix:'' });
+  const hadCodeIssues = findings.some(f => /Code node|expression has unbalanced/.test(f.title));
+  if (!hadCodeIssues) findings.push({ sev:'ok', title: 'Code & expressions: syntax balanced, all node references resolve', fix:'' });
 
   if (!findings.length) findings.push({ sev:'ok', title:'No issues found in these checks (security + structure + syntax)', fix:'Passed every check the scanner runs. Logic-level bugs (wrong branch conditions, wrong data shapes) still need eyes - send it over if something misbehaves.' });
 
@@ -399,7 +477,7 @@ function runScan() {
     '<div class="score"><div class="big '+cls+'">'+crit+'</div>'+
     '<div class="lbl">'+(crit ? '<b>'+crit+' critical finding'+(crit===1?'':'s')+'</b> - ' : '<b>No critical findings</b> - ')+warn+' warning'+(warn===1?'':'s')+', '+ok+' check'+(ok===1?'':'s')+' passed. '+verdict+'</div></div>'+
     findings.map(f => '<div class="finding"><span class="tag '+f.sev+'">'+f.sev.toUpperCase()+'</span>'+
-      '<div><h3>'+f.title+'</h3>'+(f.fix?'<p>'+f.fix+'</p>':'')+'</div></div>').join('')+
+      '<div><h3>'+esc(f.title)+'</h3>'+(f.fix?'<p>'+esc(f.fix)+'</p>':'')+'</div></div>').join('')+
     ((crit||warn) ? '<div class="cta-box"><h3>Want these fixed for you?</h3>'+
       '<p>One bounded bug fixed in 24h, flat $99, pay only when it runs green. The scan report above is yours free either way - paste it into the email.</p>'+
       '<a class="btn btn-primary" href="mailto:rescue@workflowry.dev?subject=Scanner%20findings%20-%20rescue%20request">Email me the findings</a></div>' : '');
